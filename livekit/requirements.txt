@@ -1,0 +1,2 @@
+livekit-api
+openai>=1.30

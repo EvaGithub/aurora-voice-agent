@@ -1,0 +1,16 @@
+# Hands-on voice loop dependencies.
+# Pin versions at workshop time; left unpinned so the skeleton doesn't rot.
+
+# Provider adaptor  -  Groq AND OpenAI both use the openai SDK (base_url swap).
+openai>=1.30
+
+# Config
+python-dotenv
+setuptools<81      # webrtcvad imports pkg_resources
+
+# Audio I/O + VAD (only needed for real-mic mode; --text mode needs none of these)
+sounddevice        # mic capture (uses PortAudio; `brew install portaudio` if it fails)
+webrtcvad          # voice-activity detection for turn endpointing
+numpy              # audio buffers
+
+# TTS/STT playback + capture use local system commands  -  no extra deps.
