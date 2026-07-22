@@ -11,7 +11,13 @@ os.environ.setdefault("TTS_BACKEND", "print")
 
 from agent import Agent, explicit_language_request, required_tool_for
 from knowledge import search_hotel_knowledge
-from providers import MockProvider, _env_or_default, _mk_tool, make_provider
+from providers import (
+    MockProvider,
+    _env_or_default,
+    _mk_tool,
+    _recover_tool_call,
+    make_provider,
+)
 from router import AgentRouter
 from scale_check import estimate_capacity
 from telemetry import TurnTrace
@@ -157,6 +163,40 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(attributes["guest_name"], "[REDACTED]")
         self.assertEqual(attributes["contact"], "[REDACTED]")
         self.assertEqual(attributes["check_in"], "August 12")
+
+
+class ToolCallRecoveryTests(unittest.TestCase):
+    """Groq 400 tool_use_failed errors carry the raw failed generation."""
+
+    class _FakeError(Exception):
+        def __init__(self, body):
+            self.body = body
+
+    def test_recovers_tool_call_from_failed_generation(self):
+        exc = self._FakeError({
+            "code": "tool_use_failed",
+            "failed_generation": '<function=set_language{"language": "es"}</function>',
+        })
+        call = _recover_tool_call(exc)
+        self.assertIsNotNone(call)
+        self.assertEqual(call.function.name, "set_language")
+        self.assertEqual(call.function.arguments, '{"language": "es"}')
+
+    def test_recovers_from_nested_error_body(self):
+        exc = self._FakeError({
+            "error": {"failed_generation": "<function=end_call></function>"}
+        })
+        call = _recover_tool_call(exc)
+        self.assertIsNotNone(call)
+        self.assertEqual(call.function.name, "end_call")
+        self.assertEqual(call.function.arguments, "{}")
+
+    def test_returns_none_for_unparseable_bodies(self):
+        self.assertIsNone(_recover_tool_call(self._FakeError({})))
+        self.assertIsNone(_recover_tool_call(self._FakeError(None)))
+        self.assertIsNone(_recover_tool_call(self._FakeError(
+            {"failed_generation": "<function=broken{not json}</function>"}
+        )))
 
 
 class ScaleTests(unittest.TestCase):

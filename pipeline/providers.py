@@ -51,6 +51,33 @@ DEFAULT_STT_PROMPT = (
 )
 
 
+def _recover_tool_call(exc) -> NS | None:
+    """Parse the intended tool call out of a Groq `tool_use_failed` error.
+
+    The 400 body carries the model's raw attempt, e.g.
+    `<function=set_language{"language": "es"}</function>`. Return an
+    OpenAI-shaped tool-call object, or None when nothing parseable is found.
+    """
+    body = getattr(exc, "body", None) or {}
+    if not isinstance(body, dict):
+        return None
+    # The SDK may expose the inner error dict directly or nested under "error".
+    failed = body.get("failed_generation") or (body.get("error") or {}).get("failed_generation", "")
+    match = re.search(r"<function=(\w+)\s*>?\s*(\{.*?\})?\s*</function>", failed, re.DOTALL)
+    if not match:
+        return None
+    name, raw_args = match.group(1), match.group(2) or "{}"
+    try:
+        arguments = json.dumps(json.loads(raw_args))
+    except json.JSONDecodeError:
+        return None
+    return NS(
+        id="recovered_call_1",
+        type="function",
+        function=NS(name=name, arguments=arguments),
+    )
+
+
 def _env_or_default(key: str, default: str) -> str:
     """Return a non-empty environment override or the provider preset.
 
@@ -97,14 +124,40 @@ class Provider:
         tools: list[dict] | None = None,
         tool_choice=None,
     ):
-        """One chat-completion call. Returns the raw SDK response."""
-        return self.client.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            tools=tools or None,
-            tool_choice=(tool_choice or "auto") if tools else None,
-            temperature=0.3,
-        )
+        """One chat-completion call. Returns the raw SDK response.
+
+        Groq rejects a malformed model-generated tool call with a 400
+        `tool_use_failed` error whose body still contains the raw
+        `failed_generation` text. Dropping the call would hang up on the
+        caller, so retry once and then recover the intended tool call from
+        the failed generation itself.
+        """
+        from openai import BadRequestError
+
+        attempts = 2
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=messages,
+                    tools=tools or None,
+                    tool_choice=(tool_choice or "auto") if tools else None,
+                    temperature=0.3,
+                )
+            except BadRequestError as exc:
+                if "tool_use_failed" not in str(exc):
+                    raise
+                if attempt < attempts:
+                    print(f"  [provider] malformed tool call, retrying")
+                    continue
+                recovered = _recover_tool_call(exc)
+                if recovered is None:
+                    raise
+                print(f"  [provider] recovered tool call {recovered.function.name} "
+                      "from failed generation")
+                return NS(choices=[NS(
+                    message=NS(content="", tool_calls=[recovered], role="assistant")
+                )])
 
     # --- STT ---
     def transcribe(self, pcm_int16: bytes, sample_rate: int = 16000) -> str:
