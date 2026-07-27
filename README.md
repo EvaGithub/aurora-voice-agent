@@ -1,12 +1,22 @@
-# Assignment 2: Aurora Hotel Voice Agent
+# Aurora Hotel Voice Agent
 
-Aurora is a practical hotel-reservations voice agent built for an FDE workshop. The project starts with a deterministic text agent and progressively adds a live model, business tools, local retrieval, multilingual routing, microphone audio, turn detection, telemetry, LiveKit rooms, evaluation, and capacity planning.
+Aurora is a hotel-reservations voice agent: a caller speaks, the agent answers policy questions from a grounded knowledge base, checks live availability, books a room, switches language mid-call, and hands off to a human when asked.
 
 The core cascade is:
 
 ```text
 caller audio -> VAD and endpointing -> STT -> AgentRouter -> LLM -> RAG and tools -> TTS
 ```
+
+## Attribution And Scope
+
+The staged cascade, hotel tools, retrieval, language routing, telemetry, evaluation suites, and browser demo come from the [FDE workshop scaffold](https://github.com/hamzafarooq/multi-agent-course) by Hamza Farooq. This fork adds:
+
+- **A room-native LiveKit agent worker** (`livekit/agent_worker.py`). The scaffold used the room for participant identity while the audio itself travelled over HTTP, which its README called out as the remaining gap. The worker joins the room as a real participant, subscribes to the caller's audio track, endpoints turns server-side, and publishes its own synthesized speech as a LiveKit track. See [Room-Native Agent Worker](#room-native-agent-worker).
+- **A scriptable simulated caller** (`livekit/sim_caller.py`) that publishes speech into the room and verifies the reply that comes back, so the room path is testable without a microphone, including barge-in.
+- **A publishable system-voice path** (`synthesize_wav` in `pipeline/providers.py`). The scaffold's system TTS played to the machine's speakers and returned nothing, which a worker cannot publish.
+- **Unit coverage for the worker's audio logic** (`livekit/test_agent_worker.py`, 16 tests). These caught a real defect: the minimum-utterance check measured the whole buffer including pre-roll and endpoint silence, so an 80 ms blip cleared a 300 ms threshold and would bill a transcription request on every cough.
+- **Recovery from Groq `tool_use_failed` 400s** (`pipeline/providers.py`), which previously dropped the tool call and hung up on the caller.
 
 ## Capabilities
 
@@ -28,7 +38,7 @@ caller audio -> VAD and endpointing -> STT -> AgentRouter -> LLM -> RAG and tool
 ## Project Structure
 
 ```text
-Assignment_2_voice_agent/
+aurora-voice-agent/
 |-- README.md
 |-- RUNBOOK.md
 |-- knowledge/
@@ -65,7 +75,7 @@ Assignment_2_voice_agent/
 The complete agent, tool, RAG, routing, evaluation, and scale paths run without network access or paid requests.
 
 ```bash
-cd FDE/Assignment_2_voice_agent/pipeline
+cd pipeline
 python3 smoke_test.py
 python3 -m unittest -v test_features.py
 PROVIDER=mock python3 voice_loop.py --text
@@ -85,7 +95,7 @@ Connect me to the front desk.
 ## OpenAI Setup
 
 ```bash
-cd FDE/Assignment_2_voice_agent/pipeline
+cd pipeline
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -134,7 +144,7 @@ The commands remain the same.
 Install the room demo once:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/livekit
+cd livekit
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -146,14 +156,14 @@ Use three terminals.
 Terminal 1 starts the self-contained LiveKit development server:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/livekit
+cd livekit
 ./start_local_server.sh
 ```
 
 Terminal 2 creates the room and starts the browser application:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/livekit
+cd livekit
 source .venv/bin/activate
 python create_room.py
 python talk_server.py
@@ -192,7 +202,7 @@ The room becomes the transport rather than an identity label, which is the prope
 Start the server, then the worker:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/livekit
+cd livekit
 livekit-server --dev --bind 127.0.0.1     # or ./start_local_server.sh for Docker
 python agent_worker.py                    # PROVIDER comes from pipeline/.env
 ```
@@ -265,7 +275,7 @@ Important production measures include endpoint delay, STT latency, LLM time to f
 Run all deterministic scenarios:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/evals
+cd evals
 python3 run_evals.py --suite all
 ```
 
@@ -281,7 +291,7 @@ The suites verify expected tools, actions, languages, sources, allowed text, and
 The room-native worker's audio logic has its own unit suite, which needs no server or network:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/livekit
+cd livekit
 python -m unittest -v test_agent_worker.py
 ```
 
@@ -292,7 +302,7 @@ It covers endpointing behavior (onset debounce, pre-roll retention, mid-sentence
 The calculator converts product assumptions into peak concurrency and service demand without calling a provider:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/pipeline
+cd pipeline
 python3 scale_check.py --dau 1000000
 ```
 
@@ -313,7 +323,7 @@ PSTN caller -> carrier -> SIP trunk -> SBC or SIP edge -> LiveKit room -> agent 
 Run the local signaling demonstrations:
 
 ```bash
-cd FDE/Assignment_2_voice_agent/mocks
+cd mocks
 python3 demo_call.py
 python3 demo_call.py --transfer
 python3 ivr_menu_mock.py
