@@ -195,8 +195,39 @@ class Provider:
         )
         return resp.content
 
+    def synthesize_wav(self, text: str) -> bytes:
+        """Always return WAV bytes, even on the system-voice backend.
+
+        `synthesize` returns None under TTS_BACKEND=system because the system
+        command plays straight to the machine's speakers. A room-native worker
+        cannot use that: it has to publish audio *into* the LiveKit room, so it
+        needs the samples. Rendering the system voice to a file keeps the
+        zero-cost local path usable for the worker.
+        """
+        if self.tts_backend == "system":
+            return system_tts_wav(text)
+        return self.synthesize(text) or b""
+
 
 # --- audio helpers ---
+
+def system_tts_wav(text: str, sample_rate: int = 16000) -> bytes:
+    """Render `text` to 16-bit mono WAV with the local system voice.
+
+    macOS `say` writes a file when given `-o`, so the same free voice used for
+    rehearsal can also feed a published audio track.
+    """
+    import tempfile
+
+    command = os.getenv("SYSTEM_TTS_CMD", "say")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "tts.wav")
+        subprocess.run(
+            [command, f"--data-format=LEI16@{sample_rate}", "-o", path, text],
+            check=True,
+        )
+        with open(path, "rb") as handle:
+            return handle.read()
 
 def _pcm_to_wav(pcm_int16: bytes, sample_rate: int) -> io.BytesIO:
     """Wrap raw 16-bit mono PCM samples into an in-memory WAV file."""
@@ -348,6 +379,14 @@ class MockProvider:
         if self.tts_backend == "system":
             subprocess.run([os.getenv("SYSTEM_TTS_CMD", "say"), text], check=False)
         return None  # voice_loop already prints the agent's text
+
+    def synthesize_wav(self, text: str) -> bytes:
+        """Render the system voice to bytes so mock mode can still fill a room.
+
+        The room-native worker needs publishable samples on every provider,
+        otherwise PROVIDER=mock would join the room silently.
+        """
+        return system_tts_wav(text)
 
 
 def _mk_text(content: str):

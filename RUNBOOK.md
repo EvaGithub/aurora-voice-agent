@@ -28,6 +28,15 @@ pip install -r requirements.txt
 npm install
 ```
 
+The LiveKit server itself runs either way. `start_local_server.sh` uses Docker; on a machine without Docker, install the binary instead:
+
+```bash
+brew install livekit
+livekit-server --dev --bind 127.0.0.1
+```
+
+Both paths use the development credentials `devkey` / `secret` on `localhost:7880`.
+
 For a live OpenAI path, set the following in `pipeline/.env`:
 
 ```env
@@ -250,6 +259,67 @@ What time is check-in?
 
 Verify that the language badge, response text, selected provider or browser voice, and subsequent turns change together. The Spanish policy turn should show `hotel_policies.md#Cancellation` as its grounding source. After switching to English, `¡Gracias!` must not change the language badge or session route.
 
+## Stage 5b: Room-Native Agent Worker
+
+Stage 5 shows the room carrying identity while the browser carries the audio. This stage moves the audio into the room.
+
+Explain the distinction before running anything. In Stage 5 the browser records a turn and posts it to `/voice-agent`; deleting LiveKit would not change the behavior. Here a Python process joins as the `aurora` participant, subscribes to the caller's track, and publishes its own speech, so the media path runs through the room.
+
+Terminal 1 keeps the LiveKit server running. In Terminal 2:
+
+```bash
+cd FDE/Assignment_2_voice_agent/livekit
+source .venv/bin/activate
+python agent_worker.py --probe --seconds 15
+```
+
+In Terminal 3, publish a caller turn:
+
+```bash
+cd FDE/Assignment_2_voice_agent/livekit
+source .venv/bin/activate
+python sim_caller.py --say "What is the cancellation policy?"
+```
+
+The probe should report `PASS` with 16000 Hz, 1 channel, 640-byte frames. Frames of any other size mean the stream request and the VAD window disagree. Run the probe before debugging anything downstream: it separates a transport failure from a cascade failure.
+
+Now run the live worker in Terminal 2:
+
+```bash
+python agent_worker.py
+```
+
+And in Terminal 3:
+
+```bash
+python sim_caller.py --say "What is the cancellation policy?" --listen 12
+```
+
+Verify:
+
+- The worker prints `Published agent audio track 'aurora-voice'`.
+- The worker prints a `caller>` transcript and an `aurora>` reply.
+- The caller reports `PASS: agent speech travelled back through the LiveKit room`.
+- `logs/voice-events.jsonl` gains a trace whose session ID starts with `room-`.
+- That trace contains `tts.playback_started` and `tts.playback_complete`.
+
+The reported duration covers the whole listening window rather than the speech alone, because a published track stays live and carries silence between utterances. Judge the audio by peak RMS, and use `--save reply.wav` to listen to it.
+
+Barge-in is server-side here. Interrupt the reply two seconds in:
+
+```bash
+python sim_caller.py --say "I need a room for two guests." \
+    --interrupt "Actually, connect me to a person." --interrupt-after 2 --listen 10
+```
+
+The worker prints `[barge-in] caller interrupted; playback cancelled` and takes the next turn. The browser bridge could only stop its own local playback and guess from the transcript whether it had heard itself; owning the published track makes the cancellation authoritative for every participant.
+
+Run the worker's unit suite, which needs no server:
+
+```bash
+python -m unittest -v test_agent_worker.py
+```
+
 ## Stage 6: Turn-Taking And Barge-In
 
 Use the browser controls while the call remains connected.
@@ -361,3 +431,9 @@ public voice edge -> SBC or managed SIP service
 | Provider TTS fails | Use `TTS_BACKEND=system` and restart `talk_server.py` |
 | LiveKit uses the system voice | Set `TTS_BACKEND=provider`, restart `talk_server.py`, and confirm the UI shows the provider voice |
 | Live service fails during class | Return to mock text mode and continue the architecture path |
+| Worker exits with `no current event loop` | Build `rtc.Room()` inside the coroutine; Python 3.14 no longer creates a loop implicitly |
+| `agent_worker.py --probe` receives zero frames | No participant is publishing; start `sim_caller.py` or click Start call in the browser |
+| Probe frames are not 640 bytes | The `AudioStream` request and the VAD window disagree; keep 16000 Hz, 1 channel, 20 ms |
+| Worker hears the caller but never replies | Confirm `Published agent audio track`, then check the trace for `tts.failed` |
+| Worker replies but the caller hears silence | Compare `synthesize_wav` output length against zero; system TTS must write a file, not play to speakers |
+| Docker is unavailable | `brew install livekit` and run `livekit-server --dev --bind 127.0.0.1` |

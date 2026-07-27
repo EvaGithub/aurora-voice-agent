@@ -1,2 +1,6 @@
 livekit-api
+livekit            # rtc SDK: room-native worker subscribes and publishes tracks
+webrtcvad          # server-side endpointing on subscribed frames
+numpy              # resampling provider TTS to the published track rate
+setuptools<81      # webrtcvad imports pkg_resources
 openai>=1.30

@@ -19,6 +19,8 @@ caller audio -> VAD and endpointing -> STT -> AgentRouter -> LLM -> RAG and tool
 - Browser VAD with adaptive noise calibration and playback barge-in
 - Per-turn structured telemetry and a browser trace timeline
 - Local LiveKit room with caller and agent participants
+- Room-native agent worker that subscribes to and publishes real LiveKit audio tracks
+- Scriptable simulated caller for testing the room path without a microphone
 - Deterministic task evaluation and red-team suites
 - Zero-cost capacity calculator for DAU and concurrency planning
 - SIP and IVR simulations for telephony mapping
@@ -48,6 +50,9 @@ Assignment_2_voice_agent/
 |   |-- start_local_server.sh
 |   |-- create_room.py
 |   |-- talk_server.py
+|   |-- agent_worker.py
+|   |-- sim_caller.py
+|   |-- test_agent_worker.py
 |   `-- web/
 `-- mocks/
     |-- demo_call.py
@@ -167,9 +172,61 @@ Speak while Aurora is playing a response to demonstrate playback barge-in. The b
 
 ### LiveKit Boundary
 
-The caller and Aurora identities are real LiveKit room participants. The current workshop agent processes completed browser audio through `/voice-agent`, returns provider-generated WAV audio when enabled, and otherwise uses browser speech synthesis. It is not yet a room-native agent worker that subscribes to a LiveKit audio track and publishes a TTS track.
+`talk_server.py` is the workshop bridge. The caller and Aurora identities are real room participants, but the audio itself never crosses the room: the browser captures, endpoints, and posts a completed recording to `/voice-agent` over HTTP, then plays the answer locally. Remove LiveKit from that path and the demo behaves the same, because the room carries identity rather than media.
 
-A production extension would add a LiveKit agent worker, persistent session storage, distributed cancellation, and SIP dispatch.
+`agent_worker.py` closes that gap. See **Room-Native Agent Worker** below.
+
+Persistent session storage and SIP dispatch remain out of scope.
+
+## Room-Native Agent Worker
+
+`agent_worker.py` joins the room as a real participant instead of answering over HTTP. It subscribes to the caller's published audio track, endpoints turns server-side, and publishes its own synthesized speech as a LiveKit track:
+
+```text
+caller mic -> LiveKit room -> worker subscribes -> VAD -> STT -> Agent
+          -> TTS -> worker publishes track -> LiveKit room -> caller
+```
+
+The room becomes the transport rather than an identity label, which is the property that makes SIP viable: a phone caller joins as an ordinary participant publishing an audio track, so the worker needs no separate telephony path.
+
+Start the server, then the worker:
+
+```bash
+cd FDE/Assignment_2_voice_agent/livekit
+livekit-server --dev --bind 127.0.0.1     # or ./start_local_server.sh for Docker
+python agent_worker.py                    # PROVIDER comes from pipeline/.env
+```
+
+Drive it without a microphone using the simulated caller, which publishes system-voice speech into the room and verifies the reply that comes back:
+
+```bash
+python sim_caller.py --say "What is the cancellation policy?" --listen 12
+python sim_caller.py --say "I need a room for two guests." \
+    --interrupt "Actually, connect me to a person." --interrupt-after 2 --listen 10
+```
+
+Check connectivity alone before debugging the cascade:
+
+```bash
+python agent_worker.py --probe --seconds 15
+```
+
+### What Changes Against The Browser Bridge
+
+| Concern | `talk_server.py` bridge | `agent_worker.py` |
+|---------|------------------------|-------------------|
+| Audio transport | HTTP POST of a recorded blob | Subscribed and published LiveKit tracks |
+| Endpointing | Browser JavaScript VAD | Server-side `webrtcvad` on 20 ms frames |
+| STT input | Compressed webm, codec inferred from a filename | Raw PCM through `provider.transcribe` |
+| Barge-in | Cancel local speech synthesis | `AudioSource.clear_queue()` on the published track |
+| Echo handling | Transcript blocklist heuristic | Not needed; the worker never subscribes to itself |
+| Reach | One browser tab | Any participant, including a future SIP caller |
+
+Requesting `AudioStream(sample_rate=16000, num_channels=1, frame_size_ms=20)` makes the SDK deliver exactly one `webrtcvad` window per frame, so no resampling or re-buffering layer is needed. Because the worker owns the published track, it also drops the transcript-matching echo heuristic the browser path needed to guess whether it had heard its own playback.
+
+### System Voice As Publishable Audio
+
+`Provider.synthesize` returns `None` under `TTS_BACKEND=system` because the system command plays to the machine's speakers, which a worker cannot publish. `synthesize_wav` renders the same free local voice to a file instead, so the room-native path stays zero-cost during rehearsal. `synthesize` is unchanged, so `voice_loop.py` and `talk_server.py` keep their existing behavior.
 
 ## Grounding And Tools
 
@@ -220,6 +277,15 @@ python3 run_evals.py --suite red-team --verbose
 ```
 
 The suites verify expected tools, actions, languages, sources, allowed text, and forbidden text. The red-team set covers prompt injection, policy fabrication, privacy, structured tool input, and guardrails after a language switch.
+
+The room-native worker's audio logic has its own unit suite, which needs no server or network:
+
+```bash
+cd FDE/Assignment_2_voice_agent/livekit
+python -m unittest -v test_agent_worker.py
+```
+
+It covers endpointing behavior (onset debounce, pre-roll retention, mid-sentence pauses, noise rejection) and the WAV to PCM conversion that feeds the published track. The noise-rejection case caught a real defect: measuring the minimum utterance against the whole buffer counted pre-roll and endpoint silence, so an 80 ms blip cleared a 300 ms threshold and billed a transcription request. The endpointer now measures speech frames alone.
 
 ## Scale Check
 
