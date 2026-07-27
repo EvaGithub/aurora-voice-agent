@@ -229,6 +229,7 @@ class AuroraWorker:
         self.room: rtc.Room | None = None
         self.source: rtc.AudioSource | None = None
         self.agent = None
+        self._speaker: str | None = None
         self._stream_task: asyncio.Task | None = None
         self._speak_task: asyncio.Task | None = None
         self._turn_task: asyncio.Task | None = None
@@ -299,6 +300,10 @@ class AuroraWorker:
         @self.room.on("participant_disconnected")
         def _on_leave(participant: rtc.RemoteParticipant) -> None:
             print(f"  [room] participant left: {participant.identity}")
+            # Release the stream when its publisher leaves, otherwise the next
+            # caller to join is turned away as an "extra" track and never heard.
+            if participant.identity == self._speaker:
+                self._release_stream()
 
         @self.room.on("track_subscribed")
         def _on_track(
@@ -317,7 +322,15 @@ class AuroraWorker:
             print(f"  [room] ignoring extra audio track from {participant.identity}")
             return
         print(f"  [room] subscribed to audio from {participant.identity!r}")
+        self._speaker = participant.identity
         self._stream_task = asyncio.create_task(self._consume(track))
+
+    def _release_stream(self) -> None:
+        """Drop the current caller stream so a later join can be adopted."""
+        if self._stream_task is not None:
+            self._stream_task.cancel()
+        self._stream_task = None
+        self._speaker = None
 
     # --- inbound audio ---
 
